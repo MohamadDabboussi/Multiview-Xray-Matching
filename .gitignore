@@ -1,0 +1,10 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Data / Experiments
+logs/
+dataset/
+lightning_logs/
+output/
+wandb/

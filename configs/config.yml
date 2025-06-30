@@ -1,0 +1,45 @@
+training:
+  name: "Correspondence"
+  wandb_project: null #"Correspondence"
+  type: "dual"
+  learning_rate: 0.0001
+  batch_size: 16
+  optimizer: "adam"
+  scheduler: "cosine"
+  warmup_epochs: 0
+  device: "cuda"
+  seed: 42
+  max_epochs: 50
+  augmentation:
+    radiometric: 0.7
+    geometric : 0.0
+    masked_crop: 0.0
+    cutout: 0.0
+    shift: 0.0
+  losses_weights:
+    mse: 1.0
+
+data:
+  data_path: "dataset/data.h5"
+
+model:
+  backbone: "resnet"
+  freeze_backbone: false
+  transformer:
+    transformer: true
+    transformer_d_model: 512
+    transformer_num_heads: 8
+    transformer_hidden_dim: 1024
+    transformer_num_layers: 8
+    transformer_attention_bias: false
+    transformer_mlp_input: "last"
+    transformer_mlp_bias: true
+    transformer_mlp_activation: "gelu"
+    transformer_norm_type: "layer"
+    transformer_mlp_layer_norm_input: false
+    transformer_mlp_layer_norm_output: true
+    transformer_attention_layer_norm_input: true
+    transformer_attention_layer_norm_output: true
+    transformer_norm_after_add: false
+    transformer_message_pass: true
+    positional_encoding: "rotary"
