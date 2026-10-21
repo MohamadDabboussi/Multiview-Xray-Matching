@@ -1,0 +1,72 @@
+# End-to-end pretraining: CT volumes -> on-the-fly DRRs + correspondence GT -> model.
+# Model/training hyper-parameters are those of configs/config.yml.
+training:
+  name: "Correspondence_online"
+  wandb_project: null
+  type: "dual"
+  learning_rate: 0.0001
+  batch_size: 16
+  optimizer: "adam"
+  scheduler: "cosine"
+  warmup_epochs: 0
+  device: "cuda"
+  seed: 42
+  max_epochs: 50
+  precision: "32-true"
+  augmentation:
+    radiometric: 0.7      # per-image brightness/contrast jitter (GPU)
+    geometric: 0.0        # correspondence-space augmentations of src/utils/utils.py
+    masked_crop: 0.0
+    cutout: 0.0
+    shift: 0.0
+  losses_weights:
+    mse: 1.0
+
+data:
+  ct_dir: "dataset/ct_volumes"   # directory of DICOM series folders and/or .nii(.gz)/.mha/.nrrd files, or a .txt list
+  cache_dir: "dataset/ct_cache"  # resampled 256^3 HU cubes (float16, ~32 MB each), built once
+  val_fraction: 0.1              # volume-level hold-out used for the online validation set
+  samples_per_epoch: 20000       # acquisitions (pairs) drawn per epoch -- the offline run saw 207,600 fixed pairs
+  val_samples: 512               # fixed (seeded) validation acquisitions, identical every epoch
+  pairs_per_volume: 4            # consecutive samples sharing a volume (fewer volume swaps per batch)
+  n_views: 2
+  translate: true                # random x-translation of the volume (as create_csv.py)
+  tilt_std: 0.0                  # NEW: out-of-plane tilt (deg, Gaussian std); 0 = same pose family as the paper
+  val_h5: null                   # optional: validate on an offline data.h5 produced by generate_data.py instead
+
+render:
+  dim: 256                       # DRR size (pixels) and HU cube size (voxels)
+  n_patches: 16                  # correspondence grid (16 x 16 patches -> 256 x 256 matrix)
+  delx: 2.0                      # detector pixel size (mm), as the RTK pipeline
+  n_points: 300                  # ray samples (trilinear renderer)
+  footprint_samples: 4           # sub-points per coarse voxel axis for the footprints (4 -> 64 points; best parity with RTK)
+  render_chunk: 4                # images rendered per DiffDRR call (memory/speed trade-off)
+  max_gpu_volumes: 16            # LRU cache of HU cubes on the GPU (64 MB each as float16 x2)
+  corr_reduce: "max"             # paper definition: max over voxels
+
+preprocess:
+  clip_percentiles: [1, 99]
+  clahe_clip: 1.0                # kornia CLAHE clip limit (0 disables)
+  clahe_grid: [8, 8]
+
+model:
+  backbone: "resnet"
+  freeze_backbone: false
+  transformer:
+    transformer: true
+    transformer_d_model: 512
+    transformer_num_heads: 8
+    transformer_hidden_dim: 1024
+    transformer_num_layers: 8
+    transformer_attention_bias: false
+    transformer_mlp_input: "last"
+    transformer_mlp_bias: true
+    transformer_mlp_activation: "gelu"
+    transformer_norm_type: "layer"
+    transformer_mlp_layer_norm_input: false
+    transformer_mlp_layer_norm_output: true
+    transformer_attention_layer_norm_input: true
+    transformer_attention_layer_norm_output: true
+    transformer_norm_after_add: false
+    transformer_message_pass: true
+    positional_encoding: "rotary"

@@ -1,0 +1,6 @@
+# Extra dependencies of the end-to-end (on-the-fly DRR) mode, on top of requirements.txt
+diffdrr>=0.6.0        # differentiable DRR renderer (trilinear ray-casting on the GPU)
+xvreg>=0.1.0          # xvr: pose sampling / X-ray augmentation utilities built on DiffDRR (optional)
+kornia>=0.7           # GPU CLAHE for the view preprocessing
+torchio               # volume container used by DiffDRR
+nibabel

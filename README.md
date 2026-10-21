@@ -80,6 +80,42 @@ These scripts will:
 Both output files will be located in the `dataset` folder.
 
 
+## ⚡ End-to-end mode: on-the-fly DRRs (no dataset on disk)
+
+Instead of generating `data.h5` first, `main_online.py` renders the views **inside the training step**
+and derives the correspondence matrix analytically from the camera geometry, so new poses are drawn at
+every step and nothing is written to disk. Rendering uses [DiffDRR](https://github.com/eigenvivek/DiffDRR)
+(the differentiable renderer behind [xvr](https://github.com/eigenvivek/xvr)) on the GPU.
+
+```bash
+pip install -r requirements_online.txt
+# (optional, parallel) cache the resampled 256^3 HU cubes once
+python scripts/online/prepare_volumes.py --ct_dir dataset/ct_volumes --cache_dir dataset/ct_cache --workers 8
+python main_online.py --config configs/config_online.yml
+```
+
+* `configs/config_online.yml` — `data.ct_dir` (DICOM series folders and/or `.nii(.gz)`/`.mha`/`.nrrd`), `data.cache_dir`,
+  `data.samples_per_epoch`, the pose family (`translate`, new `tilt_std`), renderer settings (`render.n_points`, `render.footprint_samples`)
+  and the GPU preprocessing (`preprocess.clahe_clip`). Model/training hyper-parameters are the same as `configs/config.yml`.
+* The acquisition distribution is the one of `create_csv.py` (angles, source distances, volume translation); the intensity models
+  (`sigmoid(HU + 1000, x0 = 1500)` for the views, `x0 = 850` for the voxel weights), the 16 × 16 patch grid and the max-over-voxels
+  definition of the matrix are those of `generate_data.py`.
+* **Correspondence ground truth.** For every coarse voxel the footprint on each view is obtained by projecting its sub-points onto the
+  detector and counting hits per patch (max-normalised, like the single-voxel Joseph projections of the offline code); the matrix is
+  the scatter-max of the outer products weighted by the voxel attenuation — O(voxels) instead of 4,096 ray-casts per pair.
+* **Parity with the offline pipeline** (`scripts/online/reference_rtk.py` → `scripts/online/validate_online.py`): on a public knee CT and
+  5 acquisitions (AP/lateral, in-plane rolls, translation), the DRRs match RTK's with NCC ≥ 0.9997 and the matrices agree with
+  Pearson r 0.96–0.98 / AP 0.95–1.0 (RTK labels at 0.3; `footprint_samples: 4`). In the RTK geometry the second CSV angle is an *in-plane* detector roll
+  (gantry fixed at 90°); the identified mapping is `RTK_MAPPING` in `src/data/online_drr.py`, so online images have the orientation of the offline dataset.
+* **Speed.** Rendering + ground truth + GPU preprocessing: ≈ 50 pairs/s on a V100S-32GB (batch 16, 256² views, 300 ray samples, 1.7 GiB)
+  vs ≈ 30 s per pair for the RTK pipeline on CPU.
+* `scripts/online/make_gifs.py` renders the animations/figures of the project page; `scripts/online/benchmark.py` measures throughput.
+
+<p align="center">
+  <img src="docs/imgs/online_vs_offline.png" alt="RTK (offline) vs on-the-fly views and correspondence matrices for five acquisitions" width="1000"/>
+</p>
+<p align="center"><i>Same CT, same acquisitions: RTK views of the offline generator, on-the-fly views, and the two correspondence matrices.</i></p>
+
 ## ✨ Correspondence Data Augmentation
 
 The following data augmentation techniques are implemented to improve model robustness.
