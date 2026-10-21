@@ -8,3 +8,8 @@ dataset/
 lightning_logs/
 output/
 wandb/
+
+# end-to-end mode
+dataset/ct_cache/
+output/
+lightning_logs/

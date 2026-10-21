@@ -1,6 +1,8 @@
 # Multiview Xray Matching
 
-[![MICCAI 2025](https://img.shields.io/badge/MICCAI-2025-orange)](#MICCAI)
+[![MICCAI 2025](https://img.shields.io/badge/MICCAI-2025-orange)](https://link.springer.com/chapter/10.1007/978-3-032-04927-8_55)
+[![Project page](https://img.shields.io/badge/Project-page-0E7C8A)](https://mohamaddabboussi.github.io/Multiview-Xray-Matching/)
+[![arXiv](https://img.shields.io/badge/arXiv-2507.00287-b31b1b)](https://arxiv.org/abs/2507.00287)
 [![CC BY-NC-SA 4.0][cc-by-nc-sa-shield]][cc-by-nc-sa]
 [![CC BY-NC-SA 4.0][cc-by-nc-sa-image]][cc-by-nc-sa]
 
@@ -16,7 +18,7 @@ This repository provides the official implementation of our paper:
 
 **“Self-Supervised Multiview Xray Matching”**  
 *Mohamad Dabboussi, Malo Huard, Yann Gousseau, Pietro Gori*  
-Accepted at **MICCAI 2025**.
+**MICCAI 2025** (LNCS 15960, pp. 578–588) · [Project page](https://mohamaddabboussi.github.io/Multiview-Xray-Matching/) · [arXiv](https://arxiv.org/abs/2507.00287) · [Open-access PDF](https://papers.miccai.org/miccai-2025/paper/3061_paper.pdf)
 
 ---
 
@@ -148,14 +150,19 @@ Visualization scripts are provided to inspect data samples, correspondences, and
 
 If you use this code for your research, please cite our paper.
 
-<!-- ```
+```bibtex
 @inproceedings{dabboussi2025multiview,
-  title={Self-Supervised Multiview Xray Matching},
-  author={Dabboussi, Mohamad and Huard, Malo and Gousseau, Yann and Gori, Pietro},
-  booktitle={MICCAI},
-  year={2025}
+  author    = {Dabboussi, Mohamad and Huard, Malo and Gousseau, Yann and Gori, Pietro},
+  title     = {Self-Supervised Multiview Xray Matching},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention -- MICCAI 2025},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {15960},
+  pages     = {578--588},
+  publisher = {Springer Nature Switzerland},
+  year      = {2025},
+  doi       = {10.1007/978-3-032-04927-8_55}
 }
-``` -->
+```
 
 
 ## 🤝 Contact
