@@ -49,6 +49,7 @@ def main():
     ap.add_argument("--crop", choices=["bbox", "cube"], default=None, help="crop before cubing: body bounding box, or a cube")
     ap.add_argument("--crop_center", type=float, nargs=3, default=None, metavar=("Z", "Y", "X"), help="cube centre as fractions of the body bbox")
     ap.add_argument("--crop_size_mm", type=float, default=None, help="cube edge in mm (default: smallest body extent)")
+    ap.add_argument("--crop_center_on", choices=["bone"], default=None, help="cube mode: centre on the bone bounding box instead of the body")
     ap.add_argument("--suffix", default="", help="suffix appended to the cached name (e.g. _knee_joint)")
     a = ap.parse_args()
     Path(a.cache_dir).mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,7 @@ def main():
     print(f"{len(vols)} volumes")
     results, errors = [], []
     with ProcessPoolExecutor(a.workers) as ex:
-        crop = None if a.crop is None else {"mode": a.crop, "center": a.crop_center, "size_mm": a.crop_size_mm}
+        crop = None if a.crop is None else {"mode": a.crop, "center": a.crop_center, "size_mm": a.crop_size_mm, "center_on": a.crop_center_on}
         futs = {ex.submit(_one, (str(v), a.cache_dir, a.dim, set(a.remove_table), not a.no_repair, crop, a.suffix)): v for v in vols}
         for f in as_completed(futs):
             try:

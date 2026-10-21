@@ -323,7 +323,7 @@ def repair_blank_slices(volume: np.ndarray, air_hu: float = -950.0, tissue_hu: f
 
 
 def crop_volume(volume: np.ndarray, spacing, mode: str = "bbox", center=None, size_mm: Optional[float] = None,
-                body_hu: float = -500.0, margin: float = 0.04) -> np.ndarray:
+                body_hu: float = -500.0, margin: float = 0.04, center_on: Optional[str] = None) -> np.ndarray:
     """Crop a (z, y, x) HU volume before it is made cubic -- the paper also 'extracts appropriate crops'.
     mode 'bbox': tight bounding box of the body (HU > body_hu) plus a margin.
     mode 'cube': cube of ``size_mm`` (default: the smallest body extent) centred at ``center`` given as
@@ -342,6 +342,10 @@ def crop_volume(volume: np.ndarray, spacing, mode: str = "bbox", center=None, si
     elif mode == "cube":
         c = np.array([0.5, 0.5, 0.5]) if center is None else np.asarray(center, dtype=float)
         ctr = lo + c * ext
+        if center_on == "bone":  # centre the cube on the bounding box of bone (HU > 200), e.g. a skull above a table
+            bz, by, bx = np.where(volume > 200)
+            if len(bz):
+                ctr = np.array([(bz.min() + bz.max()) / 2, (by.min() + by.max()) / 2, (bx.min() + bx.max()) / 2])
         vox = np.array([sz, sy, sx])
         if size_mm is None:
             size_mm = float(min(ext * vox))
