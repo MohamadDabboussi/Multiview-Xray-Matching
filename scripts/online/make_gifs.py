@@ -469,7 +469,7 @@ def main():
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--volumes", nargs="+", default=["knee", "ankle", "hip", "shoulder"])
     ap.add_argument("--orbit_volumes", nargs="*", default=None)
-    ap.add_argument("--build_volume", default=None, help="volume for the construction animation (default: first of --volumes)")
+    ap.add_argument("--build_volume", nargs="*", default=None, help="volume(s) for the construction animation (default: first of --volumes)")
     ap.add_argument("--no_grid", action="store_true", help="no patch grid overlay in the construction animation")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--pose_mapping", default=None, help="validation report.json (flip_rows/flip_cols)")
@@ -490,7 +490,8 @@ def main():
     if "teaser" in want:
         make_teaser(scene, a.volumes, out, a.size)
     if "build" in want:
-        make_build(scene, a.build_volume or a.volumes[0], out, a.size, a.fps, grid=not a.no_grid)
+        for name in (a.build_volume or [a.volumes[0]]):
+            make_build(scene, name, out, a.size, a.fps, grid=not a.no_grid)
     if "orbit" in want:
         for name in (a.orbit_volumes if a.orbit_volumes is not None else a.volumes[:2]):
             make_orbit(scene, name, out, a.frames, a.size, a.fps)
