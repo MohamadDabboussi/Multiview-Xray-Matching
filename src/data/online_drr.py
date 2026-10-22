@@ -310,24 +310,33 @@ def read_any_volume(path: str) -> Tuple[Tuple[float, float, float], np.ndarray]:
     return tuple(float(s) for s in img.GetSpacing()), vol
 
 
-def repair_blank_slices(volume: np.ndarray, air_hu: float = -950.0, tissue_hu: float = -900.0) -> Tuple[np.ndarray, int]:
-    """Replace isolated all-air slices (scanner/export artefacts that render as a black line in the
-    DRRs) by the mean of their neighbours.  volume: (z, y, x) HU.  Returns (volume, n_repaired)."""
+def repair_blank_slices(volume: np.ndarray, air_hu: float = -950.0, tissue_hu: float = -900.0,
+                        drop_hu: float = 30.0, neighbour_tol: float = 15.0) -> Tuple[np.ndarray, int]:
+    """Replace isolated corrupted slices (all-air or markedly darker than both neighbours; scanner/export
+    artefacts that render as a dark line in the DRRs) by the mean of their neighbours.
+    volume: (z, y, x) HU.  Returns (volume, n_repaired)."""
     means = volume.reshape(volume.shape[0], -1).mean(1)
     n = 0
     for z in range(1, volume.shape[0] - 1):
-        if means[z] < air_hu and means[z - 1] > tissue_hu and means[z + 1] > tissue_hu:
+        blank = means[z] < air_hu and means[z - 1] > tissue_hu and means[z + 1] > tissue_hu
+        drop = (means[z] - 0.5 * (means[z - 1] + means[z + 1]) < -drop_hu) and abs(means[z - 1] - means[z + 1]) < neighbour_tol
+        if blank or drop:
             volume[z] = 0.5 * (volume[z - 1] + volume[z + 1])
             n += 1
     return volume, n
 
 
 def crop_volume(volume: np.ndarray, spacing, mode: str = "bbox", center=None, size_mm: Optional[float] = None,
-                body_hu: float = -500.0, margin: float = 0.04, center_on: Optional[str] = None) -> np.ndarray:
+                body_hu: float = -500.0, margin: float = 0.04, center_on: Optional[str] = None,
+                zrange=None, keep_x=None, keep_y=None) -> np.ndarray:
     """Crop a (z, y, x) HU volume before it is made cubic -- the paper also 'extracts appropriate crops'.
     mode 'bbox': tight bounding box of the body (HU > body_hu) plus a margin.
     mode 'cube': cube of ``size_mm`` (default: the smallest body extent) centred at ``center`` given as
-                 fractions (z, y, x) of the body bounding box (default: its centre)."""
+                 fractions (z, y, x) of the body bounding box (default: its centre).
+    mode 'none': no cropping (only the optional masking below).
+    ``zrange``: keep only this fraction range of the body bounding box along z (crop).
+    ``keep_x`` / ``keep_y``: fraction ranges of the body bounding box; voxels outside are set to air
+    (-1000 HU) *without* changing the field of view -- e.g. keep one of two feet at the native scale."""
     sx, sy, sz = [float(v) for v in spacing]  # spacing is (x, y, z)
     mask = volume > body_hu
     if not mask.any():
@@ -336,6 +345,22 @@ def crop_volume(volume: np.ndarray, spacing, mode: str = "bbox", center=None, si
     lo = np.array([zz.min(), yy.min(), xx.min()])
     hi = np.array([zz.max(), yy.max(), xx.max()]) + 1
     ext = hi - lo
+    if zrange is not None:
+        z0, z1 = int(lo[0] + zrange[0] * ext[0]), int(lo[0] + zrange[1] * ext[0])
+        volume = volume[z0:z1]
+        return crop_volume(volume, spacing, mode, center, size_mm, body_hu, margin, center_on, None, keep_x, keep_y)
+    if keep_x is not None:
+        x0, x1 = int(lo[2] + keep_x[0] * ext[2]), int(lo[2] + keep_x[1] * ext[2])
+        volume = volume.copy()
+        volume[:, :, :x0] = -1000
+        volume[:, :, x1:] = -1000
+    if keep_y is not None:
+        y0, y1 = int(lo[1] + keep_y[0] * ext[1]), int(lo[1] + keep_y[1] * ext[1])
+        volume = volume.copy()
+        volume[:, :y0, :] = -1000
+        volume[:, y1:, :] = -1000
+    if mode == "none":
+        return volume
     if mode == "bbox":
         m = (ext * margin).astype(int)
         lo2, hi2 = np.maximum(lo - m, 0), np.minimum(hi + m, volume.shape)

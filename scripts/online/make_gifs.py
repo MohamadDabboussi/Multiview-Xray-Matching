@@ -73,12 +73,22 @@ def gray_rgb(img01: np.ndarray) -> np.ndarray:
     return np.stack([g, g, g], -1)
 
 
-def heat_overlay(rgb: np.ndarray, heat: np.ndarray, color, alpha_max=0.85, gamma=0.7) -> np.ndarray:
-    """heat: (N, N) in [0, 1] (patch grid) or (H, W). Blocky upsampling keeps the patch structure visible."""
+OVERLAY_THR = 0.3  # display cut-off of the correspondence overlays: weights below it are not drawn (CLI --overlay_thr);
+#                    0.3 is the positive threshold of the AP / PCK metrics, so the overlays show exactly the counted matches
+OVERLAY_RAMP = 0.10  # weights fade in linearly over [thr, thr + ramp] instead of a hard step
+
+
+def heat_overlay(rgb: np.ndarray, heat: np.ndarray, color, alpha_max=0.85, gamma=0.7, thr=None) -> np.ndarray:
+    """heat: (N, N) in [0, 1] (patch grid) or (H, W). Blocky upsampling keeps the patch structure visible.
+    Entries below ``thr`` (default: the module-level OVERLAY_THR) are not drawn; the ones above keep their alpha."""
     H, W = rgb.shape[:2]
     if heat.shape != (H, W):
         heat = np.kron(heat, np.ones((H // heat.shape[0], W // heat.shape[1])))
-    a = np.clip(heat, 0, 1) ** gamma * alpha_max
+    heat = np.clip(heat, 0, 1)
+    thr = OVERLAY_THR if thr is None else thr
+    if thr > 0:
+        heat = heat * np.clip((heat - thr) / max(OVERLAY_RAMP, 1e-6), 0, 1)
+    a = heat ** gamma * alpha_max
     out = rgb.astype(np.float32) * (1 - a[..., None]) + np.array(color, np.float32) * a[..., None]
     return out.clip(0, 255).astype(np.uint8)
 
@@ -108,6 +118,36 @@ def draw_grid(rgb: np.ndarray, ps: int, alpha: float = 0.18) -> np.ndarray:
     return out.clip(0, 255).astype(np.uint8)
 
 
+def content_box(raw: np.ndarray, margin: float = 0.10, min_size: int = 112, thr: float = 0.12):
+    """Square box (x0, y0, x1, y1) around the anatomy of a raw DRR, for *display* zoom only."""
+    H, W = raw.shape
+    m = raw > thr * raw.max()
+    if not m.any():
+        return (0, 0, W, H)
+    ys, xs = np.where(m)
+    cy, cx = (ys.min() + ys.max()) / 2, (xs.min() + xs.max()) / 2
+    side = max(ys.max() - ys.min(), xs.max() - xs.min()) * (1 + 2 * margin)
+    side = int(min(max(side, min_size), min(H, W)))
+    x0 = int(min(max(cx - side / 2, 0), W - side))
+    y0 = int(min(max(cy - side / 2, 0), H - side))
+    return (x0, y0, x0 + side, y0 + side)
+
+
+def union_box(boxes, H=256, W=256):
+    x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+    x1 = max(b[2] for b in boxes); y1 = max(b[3] for b in boxes)
+    side = max(x1 - x0, y1 - y0)
+    side = min(side, min(H, W))
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    x0 = int(min(max(cx - side / 2, 0), W - side)); y0 = int(min(max(cy - side / 2, 0), H - side))
+    return (x0, y0, x0 + side, y0 + side)
+
+
+def crop_rgb(rgb: np.ndarray, box) -> np.ndarray:
+    x0, y0, x1, y1 = box
+    return rgb[y0:y1, x0:x1]
+
+
 def draw_patch(rgb: np.ndarray, r: int, c: int, color, ps: int, width=3) -> np.ndarray:
     im = Image.fromarray(rgb)
     d = ImageDraw.Draw(im)
@@ -129,9 +169,10 @@ def matrix_rgb(C: np.ndarray, size: int, row=None, cmap="magma", gamma=0.6) -> n
     return np.array(im)
 
 
-def panel(rgb: np.ndarray, size: int, caption: str = "", sub: str = "", bg=PAPER, fg=INK):
+def panel(rgb: np.ndarray, size: int, caption: str = "", sub: str = "", bg=PAPER, fg=INK, sub2: str = ""):
+    """Image panel with up to three caption lines (title, subtitle, optional third line)."""
     im = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
-    cap_h = 46 if caption else 0
+    cap_h = (62 if sub2 else 46) if caption else 0
     out = Image.new("RGB", (size, size + cap_h), bg)
     out.paste(im, (0, cap_h))
     if caption:
@@ -139,6 +180,8 @@ def panel(rgb: np.ndarray, size: int, caption: str = "", sub: str = "", bg=PAPER
         d.text((6, 4), caption, fill=fg, font=font(17))
         if sub:
             d.text((6, 25), sub, fill=(110, 110, 125), font=font(13))
+        if sub2:
+            d.text((6, 41), sub2, fill=(110, 110, 125), font=font(13))
     return out
 
 
@@ -153,24 +196,32 @@ def compose(panels, gap=14, bg=PAPER, margin=14):
     return out
 
 
-def save_anim(frames, stem: str, fps: int, gif_width: int = 760, gif_colors: int = 128, hold_last=0):
+def save_anim(frames, stem: str, fps: int, gif_width: int = 760, gif_colors: int = 128, hold_last=0, durations_ms=None):
+    """mp4 (h264) + gif. ``durations_ms``: optional per-frame display time; the gif uses it natively,
+    the mp4 repeats frames accordingly."""
     import imageio
 
     frames = [np.array(f) for f in frames] + [np.array(frames[-1])] * hold_last
+    if durations_ms is not None:
+        durations_ms = list(durations_ms) + [durations_ms[-1]] * hold_last
     h, w = frames[0].shape[:2]
     h2, w2 = h - h % 2, w - w % 2  # even dims for yuv420p
     try:
         with imageio.get_writer(stem + ".mp4", fps=fps, codec="libx264", quality=None,
                                 ffmpeg_params=["-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]) as wr:
-            for f in frames:
-                wr.append_data(f[:h2, :w2])
+            for i, f in enumerate(frames):
+                reps = 1 if durations_ms is None else max(1, int(round(durations_ms[i] / 1000 * fps)))
+                for _ in range(reps):
+                    wr.append_data(f[:h2, :w2])
         print("  ->", stem + ".mp4")
     except Exception as e:  # noqa: BLE001
         print("  mp4 skipped:", e)
     scale = gif_width / w
     small = [Image.fromarray(f).resize((int(w * scale), int(h * scale)), Image.LANCZOS) for f in frames]
+    small[0].save(stem + "_poster.png")  # first frame at gif width, for <video poster>
     small = [im.quantize(colors=gif_colors, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG) for im in small]
-    small[0].save(stem + ".gif", save_all=True, append_images=small[1:], duration=int(1000 / fps), loop=0, optimize=True)
+    dur = int(1000 / fps) if durations_ms is None else [int(d) for d in durations_ms]
+    small[0].save(stem + ".gif", save_all=True, append_images=small[1:], duration=dur, loop=0, optimize=True)
     print("  ->", stem + ".gif", f"({os.path.getsize(stem + '.gif') / 1e6:.1f} MB)")
 
 
@@ -189,6 +240,10 @@ class Scene:
             arr = np.load(self.cache_dir / f"{name}_256.npy").astype(np.float32)
             self.cubes[name] = torch.from_numpy(arr).permute(2, 1, 0).contiguous().half().to(self.device)
         return self.cubes[name]
+
+    def pair_csv(self, name, item):
+        """Render an acquisition sampled with sample_acquisition() (CSV convention, RTK mapping applied)."""
+        return self.r.render_sample(self.cube(name), item["angles"], item["sid"], item["sad"], item["translation"], item.get("tilt"))
 
     def pair(self, name, cams, sid=(1050, 1050), sad=(1000, 1000), tx=0.0):
         """cams: list of (theta, phi[, roll]) in degrees. Returns raw views (V,1,H,W), corr, footprints, w."""
@@ -463,7 +518,377 @@ def make_teaser(scene: Scene, names, out_dir: Path, size: int, n_lines=10, seed=
 
 
 # ----------------------------------------------------------------------------------------------
+def _sample_variation(kind: str, rng):
+    """Second-view pose for one transformation family (first view = AP unless stated)."""
+    th = float(rng.uniform(60, 120))
+    sgn = lambda: float(rng.choice([-1, 1]))  # noqa: E731
+    if kind == "azimuth":
+        return dict(cams=[(0, 0, 0), (th, 0, 0)], sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+    if kind == "roll2":
+        return dict(cams=[(0, 0, 0), (th, 0, sgn() * float(rng.uniform(15, 35)))], sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+    if kind == "roll12":
+        return dict(cams=[(0, 0, sgn() * float(rng.uniform(10, 25))), (th, 0, sgn() * float(rng.uniform(10, 25)))],
+                    sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+    if kind == "translation":
+        return dict(cams=[(0, 0, 0), (th, 0, 0)], sid=(1050, 1050), sad=(1000, 1000), tx=sgn() * float(rng.uniform(25, 50)))
+    if kind == "magnification":
+        a = rng.random() < 0.5
+        return dict(cams=[(0, 0, 0), (th, 0, 0)], sid=(1000, 1100) if a else (1100, 1000), sad=(1200, 800) if a else (800, 1200), tx=0.0)
+    if kind == "tilt":
+        return dict(cams=[(0, 0, 0), (th, sgn() * 15.0, 0)], sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+    raise ValueError(kind)
+
+
+VARIATIONS = [
+    ("azimuth", "Rotation about the long axis only", "second view at 60–120° (as the other examples)"),
+    ("roll2", "+ in-plane roll of view 2", "detector rolled 15–35°: matches leave the row"),
+    ("roll12", "both views rolled", "independent rolls of 10–25° on each view"),
+    ("translation", "+ translation of the volume", "25–50 voxels along x (10–20 % of the field)"),
+    ("magnification", "+ different source distances", "sid 1000/1100, sad 800/1200 mm"),
+    ("family", "the paper's full pose family", "angles, rolls, shift, distances as in create_csv.py"),
+    ("tilt", "out-of-plane tilt of 15° (not in training)", "gantry tilts never occur in the training poses"),
+]
+
+
+def _fmt_pose(v):
+    (t1, p1, r1), (t2, p2, r2) = v["cams"]
+    bits = [f"θ₂ = {t2:.0f}°"]
+    if abs(r2) > 0.5:
+        bits.append(f"roll₂ = {r2:+.0f}°")
+    if abs(r1) > 0.5:
+        bits.append(f"roll₁ = {r1:+.0f}°")
+    if abs(p2) > 0.5:
+        bits.append(f"tilt₂ = {p2:+.0f}°")
+    if abs(v["tx"]) > 0.5:
+        bits.append(f"shift = {v['tx']:+.0f} vox")
+    if v["sid"][0] != v["sid"][1] or v["sad"][0] != v["sad"][1]:
+        bits.append(f"sid {v['sid'][0]:.0f}/{v['sid'][1]:.0f} · sad {v['sad'][0]:.0f}/{v['sad'][1]:.0f}")
+    return " · ".join(bits)
+
+
+def make_variations(scene: Scene, model, names, out_dir: Path, size: int, device, n_stats: int = 24, seed: int = 3,
+                    sweep_volume: str = None, preprocess: str = "legacy", fps: int = 12):
+    """Pose-variation grid, statistics per transformation family, and a sweep animation (GT vs prediction)."""
+    import random as pyrandom
+
+    from src.data.online_drr import sample_acquisition
+
+    print("[variations]", names)
+    ps = 256 // N
+    rng = np.random.default_rng(seed)
+
+    def render(kind, name, k):
+        if kind == "family":
+            item = sample_acquisition(pyrandom.Random(f"{seed}:{name}:{k}"), 2, True)
+            views, corr, _, _ = scene.pair_csv(name, item)
+            a0, a1 = item["angles"].tolist()
+            label = f"a = {a0[0]:.0f}°/{a1[0]:.0f}° , {a0[1]:.0f}°/{a1[1]:.0f}° · shift {item['translation'][0]:+.0f}"
+            return views, corr, label
+        v = _sample_variation(kind, rng)
+        views, corr, _, _ = scene.pair(name, v["cams"], sid=v["sid"], sad=v["sad"], tx=v["tx"])
+        return views, corr, _fmt_pose(v)
+
+    # ---- statistics over random pairs ----
+    stats = {}
+    for kind, title, _ in (VARIATIONS if n_stats > 0 else []):
+        aps, pcks = [], []
+        for k in range(n_stats):
+            name = names[k % len(names)]
+            views, corr, _ = render(kind, name, k)
+            C = corr[0].cpu().numpy()
+            v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+            P = predict(model, v1, v2, device)
+            aps.append(_ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32)))
+            pcks.append(_pck1(P, C))
+        stats[kind] = {"title": title, "n": n_stats, "ap_0.3_mean": float(np.mean(aps)), "ap_0.3_std": float(np.std(aps)),
+                       "pck1_mean": float(np.nanmean(pcks)), "pck1_std": float(np.nanstd(pcks))}
+        print(f"  {kind:14s} AP {np.mean(aps):.3f} ± {np.std(aps):.3f}   PCK@1 {np.nanmean(pcks):.3f}   (n={n_stats})")
+    if stats:
+        json.dump(stats, open(out_dir / "variation_stats.json", "w"), indent=1)
+
+    # ---- grid: one row per family, same volume, GT vs prediction ----
+    rows = []
+    name = names[0]
+    base_q = None
+    for kind, title, sub in VARIATIONS:
+        views, corr, label = render(kind, name, 1000)
+        C = corr[0].cpu().numpy()
+        v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+        P = predict(model, v1, v2, device)
+        ap = _ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32))
+        qs = pick_queries(views[0, 0].cpu().numpy(), C, 4)
+        if kind == "azimuth" and qs:
+            base_q = qs[1] if len(qs) > 1 else qs[0]
+        q = base_q if (base_q is not None and kind in ("azimuth", "roll2", "magnification", "tilt") and C[base_q[0] * N + base_q[1]].max() > 0.3) else (qs[1] if len(qs) > 1 else (qs[0] if qs else (8, 8)))
+        qi = q[0] * N + q[1]
+        rgb1, rgb2 = gray_rgb(v1), gray_rgb(v2)
+        rows.append(compose([
+            panel(draw_patch(rgb1.copy(), q[0], q[1], CORAL, ps), size, title, label),
+            panel(heat_overlay(rgb2, C[qi].reshape(N, N), CORAL), size, "View 2 · ground truth", sub),
+            panel(heat_overlay(rgb2, P[qi].reshape(N, N), TEAL), size, "View 2 · prediction", f"AP of this pair {ap:.2f}"),
+        ], margin=6))
+    W = max(r.width for r in rows)
+    H = sum(r.height for r in rows)
+    g = Image.new("RGB", (W, H), PAPER)
+    y = 0
+    for r in rows:
+        g.paste(r, (0, y))
+        y += r.height
+    g.save(out_dir / "pose_variations.png")
+    print("  ->", out_dir / "pose_variations.png")
+
+    # ---- sweep animation: roll, then translation, then magnification ----
+    sweep_list = [sweep_volume] if isinstance(sweep_volume, str) else (list(sweep_volume) if sweep_volume else [names[0]])
+    n_seg = 36
+    for sv in sweep_list:
+        frames, recs = [], []
+        views0, corr0, _, _ = scene.pair(sv, [(0, 0, 0), (90, 0, 0)])
+        qs = pick_queries(views0[0, 0].cpu().numpy(), corr0[0].cpu().numpy(), 3)
+        q = qs[1] if len(qs) > 1 else (qs[0] if qs else (8, 8))
+        for seg in range(3):
+            for i in range(n_seg):
+                u = math.sin(2 * math.pi * i / n_seg)  # -1..1..-1
+                qq = q
+                if seg == 0:
+                    v = dict(cams=[(0, 0, 0), (90, 0, 35 * u)], sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+                    head = f"in-plane roll of view 2: {35 * u:+.0f}°"
+                elif seg == 1:
+                    v = dict(cams=[(0, 0, 0), (75, 0, 0)], sid=(1050, 1050), sad=(1000, 1000), tx=50 * u)
+                    head = f"volume translation: {50 * u:+.0f} voxels"
+                    # the query follows the anatomy: a shift of tx voxels moves the AP image by ~tx px
+                    # (magnification sdd/sid = 1.95 over 2 mm pixels), towards -x after the column flip of the mapping
+                    dcol = int(round(-v["tx"] * 0.976 / ps)) if scene.r.mapping.get("flip_cols") else int(round(v["tx"] * 0.976 / ps))
+                    qq = (q[0], min(N - 1, max(0, q[1] + dcol)))
+                else:
+                    v = dict(cams=[(0, 0, 0), (100, 0, 0)], sid=(1050, 1050 + 50 * u), sad=(1000, 1000 - 200 * u), tx=0.0)
+                    head = f"source distance of view 2: sid {v['sid'][1]:.0f} · sad {v['sad'][1]:.0f} mm"
+                qi = qq[0] * N + qq[1]
+                views, corr, _, _ = scene.pair(sv, v["cams"], sid=v["sid"], sad=v["sad"], tx=v["tx"])
+                C = corr[0].cpu().numpy()
+                v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+                P = predict(model, v1, v2, device)
+                ap = _ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32))
+                recs.append(dict(seg=seg, qq=qq, qi=qi, head=head, ap=ap, v1=v1, v2=v2, C=C, P=P,
+                                 b1=content_box(views[0, 0].cpu().numpy()), b2=content_box(views[1, 0].cpu().numpy())))
+        # display zoom: one box per segment and per view (the anatomy moves only in the translation segment)
+        boxes = {}
+        for seg in range(3):
+            rs = [r for r in recs if r["seg"] == seg]
+            boxes[seg] = (union_box([r["b1"] for r in rs]), union_box([r["b2"] for r in rs]))
+        for r in recs:
+            B1, B2 = boxes[r["seg"]]
+            rgb1, rgb2 = gray_rgb(r["v1"]), gray_rgb(r["v2"])
+            frames.append(compose([
+                panel(crop_rgb(draw_patch(rgb1.copy(), r["qq"][0], r["qq"][1], CORAL, ps), B1), size, f"View 1 · {STUDY_NAMES.get(sv, sv)}",
+                      "fixed AP view" if r["seg"] != 1 else "shifted with the volume (query follows)"),
+                panel(crop_rgb(heat_overlay(rgb2, r["C"][r["qi"]].reshape(N, N), CORAL), B2), size, "View 2 · ground truth", r["head"]),
+                panel(crop_rgb(heat_overlay(rgb2, r["P"][r["qi"]].reshape(N, N), TEAL), B2), size, "View 2 · prediction", f"AP of this pair {r['ap']:.2f}"),
+            ]))
+        save_anim(frames, str(out_dir / f"sweep_{sv}"), fps)
+
+
+STUDY_NAMES = {"hip": "pelvis and femurs (A)", "hip2": "pelvis and femurs", "head_cube": "skull", "head_bbox": "skull", "ankle_bbox": "feet",
+               "ankle_foot": "foot", "ankle_left": "foot", "knee_left": "lower leg", "knee_left_c420": "lower leg", "knee_left_c360": "lower leg", "knee_left_c300": "lower leg", "head_z": "head", "head_z2": "head", "leg_one": "lower leg", "knee2": "knee", "head_nt": "head", "head": "head", "trunk": "abdomen and pelvis",
+               "foot_soft_nt": "foot (B)", "arm1": "upper limb", "shoulder2": "thorax",
+               "shoulder": "thorax", "shoulder2": "thorax (B)", "foot_bbox": "foot", "knee2_bbox": "knee (patient B)",
+               "spine": "cervical spine", "knee_joint": "knees (patient A)", "knee_one": "knee (patient A)", "ankle": "feet",
+               "knee": "lower legs"}
+
+
+def make_tour(scene: Scene, model, volumes, out_dir: Path, size: int, device, seed: int = 11, preprocess: str = "legacy",
+              hold_ms: int = 1500, queries_per_example: int = 2, rounds: int = 2, fps: int = 10, name: str = "tour_transformations",
+              n_candidates: int = 3):
+    """One animation: every transformation family in turn, each time on a different study; GT vs prediction."""
+    import random as pyrandom
+
+    from src.data.online_drr import sample_acquisition
+
+    print("[tour]", volumes)
+    ps = 256 // N
+    rng = np.random.default_rng(seed)
+    kinds = [k for k, _, _ in VARIATIONS]
+    titles = {k: t for k, t, _ in VARIATIONS}
+    frames, durations = [], []
+    n_ex = 0
+    for r in range(rounds):
+        for i, kind in enumerate(kinds):
+            vol = volumes[(i + 3 * r) % len(volumes)]
+            cands = []
+            for c in range(n_candidates):  # median-AP draw: neither a lucky nor an unlucky example
+                if kind == "family":
+                    item = sample_acquisition(pyrandom.Random(f"{seed}:{vol}:{r}:{c}"), 2, True)
+                    views, corr, _, _ = scene.pair_csv(vol, item)
+                    a = item["angles"].tolist()
+                    label = f"a = {a[0][0]:.0f}°/{a[0][1]:.0f}°, {a[1][0]:.0f}°/{a[1][1]:.0f}° · shift {item['translation'][0]:+.0f}"
+                else:
+                    v = _sample_variation(kind, rng)
+                    views, corr, _, _ = scene.pair(vol, v["cams"], sid=v["sid"], sad=v["sad"], tx=v["tx"])
+                    label = _fmt_pose(v)
+                C = corr[0].cpu().numpy()
+                v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+                P = predict(model, v1, v2, device)
+                ap = _ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32))
+                cands.append((ap, views, C, v1, v2, P, label))
+            cands.sort(key=lambda t: t[0])
+            ap, views, C, v1, v2, P, label = cands[len(cands) // 2]
+            qs = pick_queries(views[0, 0].cpu().numpy(), C, queries_per_example + 2)
+            qs = qs[:queries_per_example] if qs else [(8, 8)]
+            rgb1, rgb2 = gray_rgb(v1), gray_rgb(v2)
+            b1, b2 = content_box(views[0, 0].cpu().numpy()), content_box(views[1, 0].cpu().numpy())
+            study = STUDY_NAMES.get(vol, vol)
+            for (qr, qc) in qs:
+                qi = qr * N + qc
+                frames.append(compose([
+                    panel(crop_rgb(draw_patch(rgb1.copy(), qr, qc, CORAL, ps), b1), size, f"View 1 · {study}", titles[kind], sub2=label),
+                    panel(crop_rgb(heat_overlay(rgb2, C[qi].reshape(N, N), CORAL), b2), size, "View 2 · ground truth", "analytic correspondence of the query", sub2=" "),
+                    panel(crop_rgb(heat_overlay(rgb2, P[qi].reshape(N, N), TEAL), b2), size, "View 2 · prediction", f"AP of this pair {ap:.2f}", sub2=" "),
+                ]))
+                durations.append(hold_ms)
+            n_ex += 1
+    print(f"  {n_ex} examples, {len(frames)} frames")
+    save_anim(frames, str(out_dir / name), fps, durations_ms=durations)
+
+
+# ---------------------------------------------------------------------------------------------
+# Single-study tour and sweep with a systematic set of transformations
+LEG_TOUR = [
+    ("Rotation about the long axis", "θ₂ = 30°", dict(cams=[(0, 0, 0), (30, 0, 0)])),
+    ("Rotation about the long axis", "θ₂ = 60°", dict(cams=[(0, 0, 0), (60, 0, 0)])),
+    ("Rotation about the long axis", "θ₂ = 90° (lateral)", dict(cams=[(0, 0, 0), (90, 0, 0)])),
+    ("Rotation about the long axis", "θ₂ = 135°", dict(cams=[(0, 0, 0), (135, 0, 0)])),
+    ("Rotation about the long axis", "θ₂ = 180° (PA)", dict(cams=[(0, 0, 0), (180, 0, 0)])),
+    ("Rotation about the long axis", "θ₂ = 250°", dict(cams=[(0, 0, 0), (250, 0, 0)])),
+    ("In-plane roll of view 2", "θ₂ = 75° · roll₂ = +20°", dict(cams=[(0, 0, 0), (75, 0, 20)])),
+    ("In-plane roll of view 2", "θ₂ = 105° · roll₂ = −40°", dict(cams=[(0, 0, 0), (105, 0, -40)])),
+    ("Both views rolled", "roll₁ = −15° · θ₂ = 100° · roll₂ = +30°", dict(cams=[(0, 0, -15), (100, 0, 30)])),
+    ("Translation of the volume", "θ₂ = 80° · shift −45 voxels", dict(cams=[(0, 0, 0), (80, 0, 0)], tx=-45)),
+    ("Translation of the volume", "θ₂ = 110° · shift +30 voxels", dict(cams=[(0, 0, 0), (110, 0, 0)], tx=30)),
+    ("Zoom in: source closer to the patient", "view 2 · sid 900 · sad 1300 mm (×2.4)", dict(cams=[(0, 0, 0), (70, 0, 0)], sid=(1050, 900), sad=(1000, 1300))),
+    ("Zoom out: source farther away", "view 2 · sid 1100 · sad 800 mm (×1.7)", dict(cams=[(0, 0, 0), (100, 0, 0)], sid=(1050, 1100), sad=(1000, 800))),
+    ("Different magnification per view", "view 1 ×2.2 · view 2 ×1.7", dict(cams=[(0, 0, 0), (90, 0, 0)], sid=(1000, 1100), sad=(1200, 800))),
+    ("Roll + shift + zoom together", "roll₁ +10° · θ₂ 120° · roll₂ −25° · shift +35 · ×2.3", dict(cams=[(0, 0, 10), (120, 0, -25)], sid=(1000, 950), sad=(1200, 1250), tx=35)),
+    ("Paper's full pose family (random)", None, "family"),
+    ("Out-of-plane tilt of 15° (not in training)", "θ₂ = 90° · tilt₂ = +15°", dict(cams=[(0, 0, 0), (90, 15, 0)])),
+]
+
+
+def make_leg_tour(scene: Scene, model, vol: str, out_dir: Path, size: int, device, preprocess="legacy", hold_ms=1400,
+                  queries_per_example=2, fps=10, seed=5):
+    import random as pyrandom
+
+    from src.data.online_drr import sample_acquisition
+
+    print("[leg tour]", vol)
+    ps = 256 // N
+    frames, durations, stats = [], [], []
+    study = STUDY_NAMES.get(vol, vol)
+    for k, (title, label, spec) in enumerate(LEG_TOUR):
+        if spec == "family":
+            cands = []
+            for c in range(3):
+                item = sample_acquisition(pyrandom.Random(f"{seed}:{vol}:{c}"), 2, True)
+                views, corr, _, _ = scene.pair_csv(vol, item)
+                a = item["angles"].tolist()
+                lab = f"a = {a[0][0]:.0f}°/{a[0][1]:.0f}°, {a[1][0]:.0f}°/{a[1][1]:.0f}° · shift {item['translation'][0]:+.0f}"
+                C = corr[0].cpu().numpy()
+                v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+                P = predict(model, v1, v2, device)
+                ap = _ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32))
+                cands.append((ap, views, C, v1, v2, P, lab))
+            cands.sort(key=lambda t: t[0])
+            ap, views, C, v1, v2, P, label = cands[1]
+        else:
+            views, corr, _, _ = scene.pair(vol, spec["cams"], sid=spec.get("sid", (1050, 1050)), sad=spec.get("sad", (1000, 1000)), tx=spec.get("tx", 0.0))
+            C = corr[0].cpu().numpy()
+            v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+            P = predict(model, v1, v2, device)
+            ap = _ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32))
+        stats.append({"title": title, "label": label, "ap": ap})
+        print(f"  {k:2d} {title:42s} {label:50s} AP {ap:.2f}", flush=True)
+        qs = pick_queries(views[0, 0].cpu().numpy(), C, queries_per_example + 3)
+        # vary the query across examples: rotate the candidate list
+        qs = (qs[k % max(1, len(qs)):] + qs[:k % max(1, len(qs))])[:queries_per_example] if qs else [(8, 8)]
+        rgb1, rgb2 = gray_rgb(v1), gray_rgb(v2)
+        b1, b2 = content_box(views[0, 0].cpu().numpy()), content_box(views[1, 0].cpu().numpy())
+        for (qr, qc) in qs:
+            qi = qr * N + qc
+            frames.append(compose([
+                panel(crop_rgb(draw_patch(rgb1.copy(), qr, qc, CORAL, ps), b1), size, f"View 1 · {study}", title, sub2=label),
+                panel(crop_rgb(heat_overlay(rgb2, C[qi].reshape(N, N), CORAL), b2), size, "View 2 · ground truth", "analytic correspondence of the query", sub2=" "),
+                panel(crop_rgb(heat_overlay(rgb2, P[qi].reshape(N, N), TEAL), b2), size, "View 2 · prediction", f"AP of this pair {ap:.2f}", sub2=" "),
+            ]))
+            durations.append(hold_ms)
+    json.dump(stats, open(out_dir / f"leg_tour_{vol}_stats.json", "w"), indent=1)
+    save_anim(frames, str(out_dir / f"tour_{vol}"), fps, durations_ms=durations)
+
+
+def make_leg_sweep(scene: Scene, model, vol: str, out_dir: Path, size: int, device, preprocess="legacy", fps=10, n_seg=36):
+    """Five segments: azimuth 20→160°, roll ±40°, translation ±50 vox, zoom (sid 1100→850, sad 800→1300), all combined."""
+    print("[leg sweep]", vol)
+    ps = 256 // N
+    study = STUDY_NAMES.get(vol, vol)
+    views0, corr0, _, _ = scene.pair(vol, [(0, 0, 0), (90, 0, 0)])
+    qs = pick_queries(views0[0, 0].cpu().numpy(), corr0[0].cpu().numpy(), 3)
+    q = qs[1] if len(qs) > 1 else (qs[0] if qs else (8, 8))
+    recs = []
+    for seg in range(5):
+        for i in range(n_seg):
+            t = i / (n_seg - 1)
+            u = math.sin(2 * math.pi * i / n_seg)
+            qq = q
+            if seg == 0:
+                th = 20 + 140 * t
+                v = dict(cams=[(0, 0, 0), (th, 0, 0)], sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+                head = f"rotation about the long axis: θ₂ = {th:.0f}°"
+            elif seg == 1:
+                v = dict(cams=[(0, 0, 0), (90, 0, 40 * u)], sid=(1050, 1050), sad=(1000, 1000), tx=0.0)
+                head = f"in-plane roll of view 2: {40 * u:+.0f}°"
+            elif seg == 2:
+                v = dict(cams=[(0, 0, 0), (75, 0, 0)], sid=(1050, 1050), sad=(1000, 1000), tx=50 * u)
+                head = f"volume translation: {50 * u:+.0f} voxels"
+                dcol = int(round(-v["tx"] * 0.976 / ps)) if scene.r.mapping.get("flip_cols") else int(round(v["tx"] * 0.976 / ps))
+                qq = (q[0], min(N - 1, max(0, q[1] + dcol)))
+            elif seg == 3:
+                w = 0.5 - 0.5 * math.cos(2 * math.pi * i / n_seg)  # 0 → 1 → 0
+                sid2, sad2 = 1100 - 250 * w, 800 + 500 * w
+                v = dict(cams=[(0, 0, 0), (100, 0, 0)], sid=(1050, sid2), sad=(1000, sad2), tx=0.0)
+                head = f"zoom of view 2: sid {sid2:.0f} · sad {sad2:.0f} mm (×{(sid2 + sad2) / sid2:.2f})"
+            else:
+                th, roll2, tx = 60 + 60 * t, 30 * math.sin(math.pi * t), -40 * t
+                sid2, sad2 = 1050 - 100 * t, 1000 + 200 * t
+                v = dict(cams=[(0, 0, 8 * t), (th, 0, roll2)], sid=(1050, sid2), sad=(1000, sad2), tx=tx)
+                head = f"all at once: θ₂ {th:.0f}° · roll₂ {roll2:+.0f}° · shift {tx:+.0f} · ×{(sid2 + sad2) / sid2:.2f}"
+                dcol = int(round(-tx * 0.976 / ps)) if scene.r.mapping.get("flip_cols") else int(round(tx * 0.976 / ps))
+                qq = (q[0], min(N - 1, max(0, q[1] + dcol)))
+            qi = qq[0] * N + qq[1]
+            views, corr, _, _ = scene.pair(vol, v["cams"], sid=v["sid"], sad=v["sad"], tx=v["tx"])
+            C = corr[0].cpu().numpy()
+            v1, v2 = to_display(views[0, 0], preprocess), to_display(views[1, 0], preprocess)
+            P = predict(model, v1, v2, device)
+            ap = _ap(P.reshape(-1), (C > 0.3).reshape(-1).astype(np.float32))
+            recs.append(dict(seg=seg, qq=qq, qi=qi, head=head, ap=ap, v1=v1, v2=v2, C=C, P=P,
+                             b1=content_box(views[0, 0].cpu().numpy()), b2=content_box(views[1, 0].cpu().numpy())))
+    boxes = {}
+    for seg in range(5):
+        rs = [r for r in recs if r["seg"] == seg]
+        boxes[seg] = (union_box([r["b1"] for r in rs]), union_box([r["b2"] for r in rs]))
+    frames = []
+    for r in recs:
+        B1, B2 = boxes[r["seg"]]
+        rgb1, rgb2 = gray_rgb(r["v1"]), gray_rgb(r["v2"])
+        sub1 = "shifted with the volume (query follows)" if r["seg"] in (2, 4) else ("rolled by +8° at the end" if r["seg"] == 4 else "fixed AP view")
+        frames.append(compose([
+            panel(crop_rgb(draw_patch(rgb1.copy(), r["qq"][0], r["qq"][1], CORAL, ps), B1), size, f"View 1 · {study}", sub1),
+            panel(crop_rgb(heat_overlay(rgb2, r["C"][r["qi"]].reshape(N, N), CORAL), B2), size, "View 2 · ground truth", r["head"]),
+            panel(crop_rgb(heat_overlay(rgb2, r["P"][r["qi"]].reshape(N, N), TEAL), B2), size, "View 2 · prediction", f"AP of this pair {r['ap']:.2f}"),
+        ]))
+    aps = [r["ap"] for r in recs]
+    print(f"  sweep AP: mean {np.mean(aps):.2f}  min {np.min(aps):.2f}  per segment " + " ".join(f"{np.mean([r['ap'] for r in recs if r['seg'] == s_]):.2f}" for s_ in range(5)))
+    save_anim(frames, str(out_dir / f"sweep5_{vol}"), fps)
+
+
 def main():
+    global OVERLAY_THR
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache_dir", required=True)
     ap.add_argument("--out_dir", required=True)
@@ -478,15 +903,39 @@ def main():
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--n_queries", type=int, default=6)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--only", nargs="*", default=None, choices=["orbit", "build", "prediction", "teaser"])
+    ap.add_argument("--only", nargs="*", default=None, choices=["orbit", "build", "prediction", "teaser", "variations", "tour", "legtour", "legsweep"])
+    ap.add_argument("--leg_volume", default="knee_left")
+    ap.add_argument("--tour_volumes", nargs="*", default=None)
+    ap.add_argument("--tour_hold_ms", type=int, default=1500)
+    ap.add_argument("--var_volumes", nargs="*", default=None, help="volumes for the pose-variation grid/statistics (default: --volumes)")
+    ap.add_argument("--var_sweep_volume", nargs="*", default=None)
+    ap.add_argument("--var_stats_n", type=int, default=24)
     ap.add_argument("--preprocess", default="both", choices=["public", "legacy", "both"], help="view preprocessing fed to the checkpoint")
+    ap.add_argument("--overlay_thr", type=float, default=OVERLAY_THR,
+                    help="correspondence weights below this value are not drawn in the overlays (GT and prediction)")
     a = ap.parse_args()
+    OVERLAY_THR = a.overlay_thr
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device(a.device)
     mapping = json.load(open(a.pose_mapping))["pose_mapping"] if a.pose_mapping else None
     scene = Scene(a.cache_dir, device, mapping)
     want = set(a.only or ["orbit", "build", "prediction", "teaser"])
+    if ("legtour" in want or "legsweep" in want) and a.ckpt:
+        model = load_model(a.ckpt, device)
+        pp = "legacy" if a.preprocess == "both" else a.preprocess
+        if "legtour" in want:
+            make_leg_tour(scene, model, a.leg_volume, out, a.size, device, preprocess=pp, fps=a.fps)
+        if "legsweep" in want:
+            make_leg_sweep(scene, model, a.leg_volume, out, a.size, device, preprocess=pp, fps=a.fps)
+    if "tour" in want and a.ckpt:
+        model = load_model(a.ckpt, device)
+        make_tour(scene, model, a.tour_volumes or a.volumes, out, a.size, device, hold_ms=a.tour_hold_ms,
+                  preprocess="legacy" if a.preprocess == "both" else a.preprocess, fps=a.fps)
+    if "variations" in want and a.ckpt:
+        model = load_model(a.ckpt, device)
+        make_variations(scene, model, a.var_volumes or a.volumes, out, a.size, device, n_stats=a.var_stats_n,
+                        sweep_volume=a.var_sweep_volume, preprocess="legacy" if a.preprocess == "both" else a.preprocess, fps=a.fps)
     if "teaser" in want:
         make_teaser(scene, a.volumes, out, a.size)
     if "build" in want:

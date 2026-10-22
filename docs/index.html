@@ -483,7 +483,23 @@ footer{margin:80px 0 0;padding:26px 0 48px;border-top:1px solid var(--rule);text
       <source src="static/media/prediction_knee_ankle_hip_shoulder.mp4" type="video/mp4">
       <img src="static/figures/prediction_grid.png" alt="Prediction examples">
     </video>
-    <figcaption><b>Qualitative.</b> For a query patch (red square, view&nbsp;1), the analytic ground truth (coral) and the prediction of the released DRR-pretrained checkpoint (teal) on view&nbsp;2. The pairs are rendered from <em>held-out</em> public CT volumes (lower leg, feet, pelvis, thorax) with the on-the-fly pipeline, so neither the anatomy nor the poses were seen in training; on these four pairs the per-pair AP of the prediction against the analytic matrix is 0.72–0.92.</figcaption>
+    <figcaption><b>Qualitative.</b> For a query patch (red square, view&nbsp;1), the analytic ground truth (coral) and the prediction of the released DRR-pretrained checkpoint (teal) on view&nbsp;2. The pairs are rendered from <em>held-out</em> public CT volumes (lower leg, feet, pelvis, thorax) with the on-the-fly pipeline, so neither the anatomy nor the poses were seen in training; on these four pairs the per-pair AP of the prediction against the analytic matrix is 0.72–0.92. In all overlays of this page only entries above 0.3, the positive threshold of the AP and PCK metrics, are coloured; weaker entries are left blank.</figcaption>
+  </div>
+
+  <h3><span class="num">¶</span>Which view changes does the matching handle?</h3>
+  <p>In the examples above the second camera only turns about the long axis of the body, so a patch and its partners always sit at the same height: the correspondence bands are horizontal. That is a property of those examples, not of the method. The training poses of the paper also roll each detector in its plane (around 180&nbsp;&plusmn;&nbsp;15&deg;, with wider rolls for part of the samples), shift the volume by up to 50&nbsp;voxels and draw the source and detector distances per view (magnification 1.8–2.2&times;). Below, each transformation is applied separately to a held-out public CT volume of a lower leg, never seen in training, with the released DRR-pretrained checkpoint and its training-time preprocessing.</p>
+  <div class="fig card">
+    <video autoplay muted loop playsinline preload="metadata" poster="static/figures/tour_leg_poster.png" aria-label="Seventeen transformations of the second view on one lower-leg CT, with ground truth and prediction">
+      <source src="static/media/tour_leg.mp4" type="video/mp4">
+      <img src="static/media/tour_leg.gif" alt="Transformation tour on a lower leg">
+    </video>
+    <figcaption><b>Seventeen transformations on one study</b> (public lower-leg CT, 360&nbsp;mm field of view, one patch &asymp; 22&nbsp;mm; two query patches per transformation). Rotations about the long axis from 30&deg; to 250&deg;, in-plane rolls of one or both views, translations of the volume, zoom in and out by moving the source, different magnifications per view, all of them together, a random draw of the paper's pose family, and an out-of-plane tilt as a control. The per-pair AP is printed in each frame: 0.83–0.93 for every single transformation of the training family, 0.87 when roll, shift and zoom change together, 0.83 for the random draw of the paper's family, 0.65 for the tilt that the model never saw.</figcaption>
+  </div>
+  <div class="fig card">
+    <video autoplay muted loop playsinline preload="metadata" poster="static/figures/sweep_leg_poster.png" aria-label="Continuous sweep on the lower leg: rotation, roll, translation, zoom, then everything together, with ground truth and prediction">
+      <source src="static/media/sweep_leg.mp4" type="video/mp4">
+    </video>
+    <figcaption><b>Sweeping the transformations</b> on the same lower leg, five segments: the second view rotates from 20&deg; to 160&deg; about the long axis; it rolls from &minus;40&deg; to +40&deg;; the volume is shifted by &plusmn;50&nbsp;voxels (the query patch follows the anatomy); the source moves closer and the detector farther (magnification 1.7&times; to 2.5&times;); finally rotation, roll, shift and zoom change together. Ground truth (coral) and prediction (teal) of one query patch; panels are zoomed on the anatomy for display, the model always sees the full field of view.</figcaption>
   </div>
 
   <h3><span class="num">3</span>Multi-view fracture classification</h3>
